@@ -311,7 +311,7 @@ def draw_mini_system_panel(
     t = min(t, len(result.action) - 1)
 
     ax.set_xlim(0, 10)
-    ax.set_ylim(0, 5.8)
+    ax.set_ylim(0, 7)
     ax.axis("off")
 
     q1_now = int(result.q1[t])
@@ -406,7 +406,7 @@ def draw_mini_system_panel(
     preempt_msg = detect_preemption(result, t)
     if preempt_msg is not None:
         banner_x = 0.35
-        banner_y = 0.45
+        banner_y = 1.05
         banner_w = 8.9
         banner_h = 0.55
         ax.add_patch(
@@ -436,7 +436,7 @@ def draw_system_grid(
     t: int,
     scenario: Scenario,
 ) -> plt.Figure:
-    fig, axes = plt.subplots(2, 2, figsize=(10, 6.5))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 5.3))
     axes = axes.flatten()
 
     for ax, name in zip(axes, demo_results.keys()):
