@@ -1,7 +1,6 @@
-import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyArrowPatch
@@ -49,22 +48,29 @@ class SimulationResult:
     cum_disc_cost: np.ndarray
 
 
+@dataclass
+class AggregateResult:
+    times: np.ndarray
+    mean_cum_disc_cost: np.ndarray
+    std_cum_disc_cost: np.ndarray
+    mean_final_cost: float
+
+
 # =========================================================
 # Fixed scenario
 # =========================================================
 
 def get_scenario() -> Scenario:
-    # Chosen so that "serve more expensive queue" and "serve longer queue"
-    # can differ from μc-rule in interesting ways.
+    # Sharper tradeoff so policy differences are easier to see
     return Scenario(
-        horizon=80,
-        lambda1=0.75,
-        lambda2=0.95,
-        mu1=0.90,
-        mu2=0.45,
-        c1=2.0,
-        c2=3.5,
-        discount_alpha=0.98,
+        horizon=100,
+        lambda1=0.65,
+        lambda2=0.85,
+        mu1=0.95,
+        mu2=0.35,
+        c1=1.2,
+        c2=4.8,
+        discount_alpha=0.985,
         seed=7,
     )
 
@@ -79,8 +85,7 @@ def generate_common_sample_path(s: Scenario) -> Dict[str, np.ndarray]:
     arrivals1 = rng.poisson(s.lambda1, size=s.horizon)
     arrivals2 = rng.poisson(s.lambda2, size=s.horizon)
 
-    # Pre-generate geometric-style service completion Bernoulli trials:
-    # if queue i is served during time t, service completes with prob mu_i
+    # If queue i is served during step t, service completes with prob mu_i
     service_success_q1 = rng.binomial(1, s.mu1, size=s.horizon)
     service_success_q2 = rng.binomial(1, s.mu2, size=s.horizon)
 
@@ -126,25 +131,24 @@ def policy_highest_cost_only(q1: int, q2: int, s: Scenario, t: int) -> int:
     return 1 if s.c1 >= s.c2 else 2
 
 
-def policy_random_fixed_seed_factory(seed: int) -> Callable[[int, int, Scenario, int], int]:
-    rng = np.random.default_rng(seed)
-
-    def _policy(q1: int, q2: int, s: Scenario, t: int) -> int:
-        if q1 == 0 and q2 == 0:
-            return 0
-        if q1 == 0:
-            return 2
-        if q2 == 0:
-            return 1
-        return int(rng.choice([1, 2]))
-    return _policy
+def policy_random_from_rng(
+    q1: int, q2: int, s: Scenario, t: int, rng: np.random.Generator
+) -> int:
+    if q1 == 0 and q2 == 0:
+        return 0
+    if q1 == 0:
+        return 2
+    if q2 == 0:
+        return 1
+    return int(rng.choice([1, 2]))
 
 
 POLICIES: Dict[str, Callable[[int, int, Scenario, int], int]] = {
     "μc-rule": policy_mu_c,
     "Longest queue first": policy_longest_queue,
     "Highest cost only": policy_highest_cost_only,
-    "Random": policy_random_fixed_seed_factory(12345),
+    # Random is handled separately because it needs an RNG
+    "Random": lambda q1, q2, s, t: 0,
 }
 
 
@@ -154,9 +158,10 @@ POLICIES: Dict[str, Callable[[int, int, Scenario, int], int]] = {
 
 def simulate_policy(
     policy_name: str,
-    policy_fn: Callable[[int, int, Scenario, int], int],
+    policy_fn,
     s: Scenario,
     common_path: Dict[str, np.ndarray],
+    random_policy_rng: np.random.Generator | None = None,
 ) -> SimulationResult:
     q1 = np.zeros(s.horizon + 1, dtype=int)
     q2 = np.zeros(s.horizon + 1, dtype=int)
@@ -172,18 +177,22 @@ def simulate_policy(
     running = 0.0
 
     for t in range(s.horizon):
-        a = policy_fn(q1[t], q2[t], s, t)
+        if policy_name == "Random":
+            a = policy_random_from_rng(q1[t], q2[t], s, t, random_policy_rng)
+        else:
+            a = policy_fn(q1[t], q2[t], s, t)
+
         action[t] = a
 
-        # Cost during step t based on current queue lengths
+        # Cost at step t uses current queue lengths
         inst_cost[t] = s.c1 * q1[t] + s.c2 * q2[t]
         running += (s.discount_alpha ** t) * inst_cost[t]
         cum_disc_cost[t] = running
 
-        # One-step update: service first, then arrivals
         next_q1 = q1[t]
         next_q2 = q2[t]
 
+        # Service first, then arrivals
         if a == 1 and q1[t] > 0:
             if service_success_q1[t] == 1:
                 next_q1 -= 1
@@ -208,14 +217,39 @@ def simulate_policy(
 
 
 @st.cache_data
-def compute_all_results() -> Tuple[Scenario, Dict[str, SimulationResult]]:
+def compute_all_results(n_replications: int = 200) -> Tuple[
+    Scenario, Dict[str, SimulationResult], Dict[str, AggregateResult]
+]:
     s = get_scenario()
-    common_path = generate_common_sample_path(s)
-    results = {
-        name: simulate_policy(name, fn, s, common_path)
-        for name, fn in POLICIES.items()
-    }
-    return s, results
+
+    # One representative run for left-side animation
+    common_path_demo = generate_common_sample_path(s)
+    demo_results: Dict[str, SimulationResult] = {}
+    for name, fn in POLICIES.items():
+        rng = np.random.default_rng(123) if name == "Random" else None
+        demo_results[name] = simulate_policy(name, fn, s, common_path_demo, rng)
+
+    # Averaged results for right-side comparison
+    aggregate_results: Dict[str, AggregateResult] = {}
+    for name, fn in POLICIES.items():
+        all_cum_costs = []
+
+        for rep in range(n_replications):
+            rep_s = Scenario(**{**s.__dict__, "seed": s.seed + rep})
+            common_path = generate_common_sample_path(rep_s)
+            rng = np.random.default_rng(10000 + rep) if name == "Random" else None
+            res = simulate_policy(name, fn, rep_s, common_path, rng)
+            all_cum_costs.append(res.cum_disc_cost)
+
+        all_cum_costs = np.array(all_cum_costs)
+        aggregate_results[name] = AggregateResult(
+            times=np.arange(s.horizon),
+            mean_cum_disc_cost=np.mean(all_cum_costs, axis=0),
+            std_cum_disc_cost=np.std(all_cum_costs, axis=0),
+            mean_final_cost=float(np.mean(all_cum_costs[:, -1])),
+        )
+
+    return s, demo_results, aggregate_results
 
 
 # =========================================================
@@ -228,8 +262,8 @@ def draw_system_figure(
     scenario: Scenario,
     policy_name: str,
 ) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.set_xlim(0, 10)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.set_xlim(0, 12)
     ax.set_ylim(0, 10)
     ax.axis("off")
 
@@ -239,81 +273,12 @@ def draw_system_figure(
     inst = float(result.inst_cost[t]) if t < len(result.inst_cost) else 0.0
     cum = float(result.cum_disc_cost[t]) if t < len(result.cum_disc_cost) else 0.0
 
-    # Queue boxes
-    q_width = 2.2
-    q_max_height = 5.5
-    box_x = 1.0
-    q1_y = 4.0
-    q2_y = 0.8
-
-    max_vis = max(
-        1,
-        np.max(result.q1[: len(result.action) + 1]),
-        np.max(result.q2[: len(result.action) + 1]),
-    )
-
-    h1 = q_max_height * min(q1_now / max_vis, 1.0)
-    h2 = q_max_height * min(q2_now / max_vis, 1.0)
-
-    ax.add_patch(Rectangle((box_x, q1_y), q_width, q_max_height, fill=False, linewidth=2))
-    ax.add_patch(Rectangle((box_x, q2_y), q_width, q_max_height, fill=False, linewidth=2))
-
-    ax.add_patch(Rectangle((box_x, q1_y), q_width, h1, alpha=0.55))
-    ax.add_patch(Rectangle((box_x, q2_y), q_width, h2, alpha=0.55))
-
-    ax.text(box_x + q_width / 2, q1_y + q_max_height + 0.3, "Queue 1", ha="center", fontsize=12)
-    ax.text(box_x + q_width / 2, q2_y + q_max_height + 0.3, "Queue 2", ha="center", fontsize=12)
-
-    ax.text(box_x + q_width / 2, q1_y + q_max_height / 2, f"$X_1={q1_now}$", ha="center", va="center", fontsize=13)
-    ax.text(box_x + q_width / 2, q2_y + q_max_height / 2, f"$X_2={q2_now}$", ha="center", va="center", fontsize=13)
-
-    # Server
-    server_x = 6.2
-    server_y = 3.6
-    server_w = 2.0
-    server_h = 2.0
-
-    server_color = "#DDDDDD"
-    if a == 1:
-        server_color = "#ffb3b3"
-    elif a == 2:
-        server_color = "#b3d9ff"
-
-    ax.add_patch(Rectangle((server_x, server_y), server_w, server_h, facecolor=server_color, edgecolor="black", linewidth=2))
-    ax.text(server_x + server_w / 2, server_y + server_h / 2, "Server", ha="center", va="center", fontsize=13)
-
-    # Arrows
-    q1_arrow_color = "black"
-    q2_arrow_color = "black"
-    if a == 1:
-        q1_arrow_color = "red"
-    elif a == 2:
-        q2_arrow_color = "blue"
-
-    ax.add_patch(
-        FancyArrowPatch(
-            (box_x + q_width, q1_y + q_max_height / 2),
-            (server_x, server_y + 1.4),
-            arrowstyle="->",
-            mutation_scale=18,
-            linewidth=2.5,
-            color=q1_arrow_color,
-        )
-    )
-    ax.add_patch(
-        FancyArrowPatch(
-            (box_x + q_width, q2_y + q_max_height / 2),
-            (server_x, server_y + 0.6),
-            arrowstyle="->",
-            mutation_scale=18,
-            linewidth=2.5,
-            color=q2_arrow_color,
-        )
-    )
-
-    # Policy stats
     mu_c1 = scenario.mu1 * scenario.c1
     mu_c2 = scenario.mu2 * scenario.c2
+
+    # Clean text area
+    ax.text(0.3, 9.6, f"Policy: {policy_name}", fontsize=13, weight="bold")
+    ax.text(0.3, 9.1, f"Time step: {t}", fontsize=12)
 
     if a == 1:
         serve_txt = "Serving Queue 1"
@@ -325,12 +290,77 @@ def draw_system_figure(
         serve_txt = "Idle"
         serve_color = "black"
 
-    ax.text(0.2, 9.6, f"Policy: {policy_name}", fontsize=13, weight="bold")
-    ax.text(0.2, 9.1, f"Time step: {t}", fontsize=12)
-    ax.text(0.2, 8.6, serve_txt, fontsize=12, color=serve_color, weight="bold")
-    ax.text(0.2, 8.1, rf"$\mu_1c_1={mu_c1:.2f}$,  $\mu_2c_2={mu_c2:.2f}$", fontsize=12)
-    ax.text(0.2, 7.6, f"Instantaneous cost: {inst:.2f}", fontsize=12)
-    ax.text(0.2, 7.1, f"Cumulative discounted cost: {cum:.2f}", fontsize=12)
+    ax.text(0.3, 8.6, serve_txt, fontsize=12, color=serve_color, weight="bold")
+    ax.text(0.3, 8.0, rf"$\mu_1c_1={mu_c1:.2f}$,   $\mu_2c_2={mu_c2:.2f}$", fontsize=12)
+    ax.text(0.3, 7.4, f"Instantaneous cost: {inst:.2f}", fontsize=12)
+    ax.text(0.3, 6.8, f"Cumulative discounted cost: {cum:.2f}", fontsize=12)
+
+    # Queue bars side by side
+    max_vis = max(
+        1,
+        np.max(result.q1[: len(result.action) + 1]),
+        np.max(result.q2[: len(result.action) + 1]),
+    )
+
+    bar_bottom = 1.4
+    bar_height = 4.6
+    bar_width = 1.6
+    q1_x = 1.5
+    q2_x = 4.0
+
+    h1 = bar_height * min(q1_now / max_vis, 1.0)
+    h2 = bar_height * min(q2_now / max_vis, 1.0)
+
+    for x, label, h, q_now in [
+        (q1_x, "Queue 1", h1, q1_now),
+        (q2_x, "Queue 2", h2, q2_now),
+    ]:
+        ax.add_patch(Rectangle((x, bar_bottom), bar_width, bar_height, fill=False, linewidth=2))
+        ax.add_patch(Rectangle((x, bar_bottom), bar_width, h, alpha=0.55))
+        ax.text(x + bar_width / 2, bar_bottom + bar_height + 0.35, label, ha="center", fontsize=12)
+        ax.text(x + bar_width / 2, bar_bottom + bar_height / 2, f"{q_now}", ha="center", va="center", fontsize=14)
+
+    # Server
+    server_x = 8.0
+    server_y = 3.0
+    server_w = 2.2
+    server_h = 1.8
+
+    server_color = "#DDDDDD"
+    if a == 1:
+        server_color = "#ffb3b3"
+    elif a == 2:
+        server_color = "#b3d9ff"
+
+    ax.add_patch(Rectangle((server_x, server_y), server_w, server_h,
+                           facecolor=server_color, edgecolor="black", linewidth=2))
+    ax.text(server_x + server_w / 2, server_y + server_h / 2,
+            "Server", ha="center", va="center", fontsize=13)
+
+    # Arrows
+    q1_arrow_color = "red" if a == 1 else "black"
+    q2_arrow_color = "blue" if a == 2 else "black"
+
+    ax.add_patch(
+        FancyArrowPatch(
+            (q1_x + bar_width, bar_bottom + bar_height / 2),
+            (server_x, server_y + 1.2),
+            arrowstyle="->",
+            mutation_scale=18,
+            linewidth=2.5,
+            color=q1_arrow_color,
+        )
+    )
+    ax.add_patch(
+        FancyArrowPatch(
+            (q2_x + bar_width, bar_bottom + bar_height / 2),
+            (server_x, server_y + 0.6),
+            arrowstyle="->",
+            mutation_scale=18,
+            linewidth=2.5,
+            color=q2_arrow_color,
+        )
+    )
 
     fig.tight_layout()
     return fig
@@ -340,16 +370,20 @@ def draw_system_figure(
 # Plotting: right-side cost panels
 # =========================================================
 
-def draw_cost_grid(results: Dict[str, SimulationResult], t: int, selected_policy: str) -> plt.Figure:
+def draw_cost_grid(
+    aggregate_results: Dict[str, AggregateResult],
+    t: int,
+    selected_policy: str,
+) -> plt.Figure:
     fig, axes = plt.subplots(2, 2, figsize=(9, 6))
     axes = axes.flatten()
 
-    names = list(results.keys())
+    names = list(aggregate_results.keys())
 
     for ax, name in zip(axes, names):
-        res = results[name]
+        res = aggregate_results[name]
         x = res.times[: t + 1]
-        y = res.cum_disc_cost[: t + 1]
+        y = res.mean_cum_disc_cost[: t + 1]
 
         ax.plot(x, y, linewidth=2)
         ax.set_title(name, fontsize=10, weight="bold" if name == selected_policy else None)
@@ -360,7 +394,7 @@ def draw_cost_grid(results: Dict[str, SimulationResult], t: int, selected_policy
 
         ax.set_xlim(0, len(res.times) - 1)
         ax.set_xlabel("time", fontsize=9)
-        ax.set_ylabel("cum. cost", fontsize=9)
+        ax.set_ylabel("mean cum. cost", fontsize=9)
         ax.grid(alpha=0.25)
 
         final_so_far = y[-1] if len(y) > 0 else 0.0
@@ -378,7 +412,7 @@ def draw_cost_grid(results: Dict[str, SimulationResult], t: int, selected_policy
 
 
 # =========================================================
-# UI
+# UI helpers
 # =========================================================
 
 def scenario_summary(s: Scenario) -> str:
@@ -391,23 +425,26 @@ def scenario_summary(s: Scenario) -> str:
     )
 
 
+# =========================================================
+# Main app
+# =========================================================
+
 def main() -> None:
     st.title(TITLE)
     st.caption(SUBTITLE)
 
-    scenario, results = compute_all_results()
+    scenario, demo_results, aggregate_results = compute_all_results()
 
     with st.expander("Scenario", expanded=False):
         st.write(scenario_summary(scenario))
-        st.write(
-            "All policies are evaluated on the same arrivals and the same service-completion sample path."
-        )
+        st.write("Left panel: one representative sample path.")
+        st.write("Right panel: mean cumulative discounted cost over many replications.")
 
     top_controls = st.columns([1.2, 1, 1])
     with top_controls[0]:
         selected_policy = st.selectbox(
             "Policy shown on the left",
-            list(results.keys()),
+            list(demo_results.keys()),
             index=0,
         )
     with top_controls[1]:
@@ -417,11 +454,9 @@ def main() -> None:
 
     max_t = scenario.horizon - 1
 
-    # persistent time
     if "timestep" not in st.session_state:
         st.session_state.timestep = 0
 
-    # manual slider
     t = st.slider("Time", 0, max_t, st.session_state.timestep, 1)
     st.session_state.timestep = t
 
@@ -430,7 +465,7 @@ def main() -> None:
     with left:
         st.subheader("System behavior")
         fig_left = draw_system_figure(
-            results[selected_policy],
+            demo_results[selected_policy],
             st.session_state.timestep,
             scenario,
             selected_policy,
@@ -439,22 +474,26 @@ def main() -> None:
 
     with right:
         st.subheader("Policy comparison")
-        fig_right = draw_cost_grid(results, st.session_state.timestep, selected_policy)
+        fig_right = draw_cost_grid(
+            aggregate_results,
+            st.session_state.timestep,
+            selected_policy,
+        )
         st.pyplot(fig_right, clear_figure=True)
 
-        final_costs = {
-            name: res.cum_disc_cost[-1]
-            for name, res in results.items()
-        }
-        ranking = sorted(final_costs.items(), key=lambda kv: kv[1])
-        st.markdown("**Final discounted cost ranking**")
+        ranking = sorted(
+            [(name, res.mean_final_cost) for name, res in aggregate_results.items()],
+            key=lambda kv: kv[1],
+        )
+        st.markdown("**Mean final discounted cost ranking**")
         for i, (name, value) in enumerate(ranking, start=1):
             st.write(f"{i}. {name}: {value:.2f}")
 
     if autoplay and st.session_state.timestep < max_t:
-        delay = {"Slow": 0.55, "Medium": 0.25, "Fast": 0.08}[speed]
+        step_jump = {"Slow": 1, "Medium": 2, "Fast": 5}[speed]
+        delay = {"Slow": 0.50, "Medium": 0.20, "Fast": 0.03}[speed]
         time.sleep(delay)
-        st.session_state.timestep += 1
+        st.session_state.timestep = min(max_t, st.session_state.timestep + step_jump)
         st.rerun()
 
 
