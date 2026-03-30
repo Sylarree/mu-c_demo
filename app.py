@@ -61,15 +61,17 @@ class AggregateResult:
 # =========================================================
 
 def get_scenario() -> Scenario:
-    # Sharper tradeoff so policy differences are easier to see
+    # Designed so μc-rule and highest-cost-only differ:
+    # c2 > c1, but μ1*c1 > μ2*c2
+    # Also made easier to visualize: service not too weak, arrivals calmer
     return Scenario(
-        horizon=100,
-        lambda1=0.65,
-        lambda2=0.85,
+        horizon=80,
+        lambda1=0.45,
+        lambda2=0.55,
         mu1=0.95,
-        mu2=0.35,
-        c1=1.2,
-        c2=4.8,
+        mu2=0.45,
+        c1=3.0,
+        c2=4.0,
         discount_alpha=0.985,
         seed=7,
     )
@@ -147,8 +149,7 @@ POLICIES: Dict[str, Callable[[int, int, Scenario, int], int]] = {
     "μc-rule": policy_mu_c,
     "Longest queue first": policy_longest_queue,
     "Highest cost only": policy_highest_cost_only,
-    # Random is handled separately because it needs an RNG
-    "Random": lambda q1, q2, s, t: 0,
+    "Random": lambda q1, q2, s, t: 0,   # handled separately
 }
 
 
@@ -222,14 +223,14 @@ def compute_all_results(n_replications: int = 200) -> Tuple[
 ]:
     s = get_scenario()
 
-    # One representative run for left-side animation
+    # Representative run for animations
     common_path_demo = generate_common_sample_path(s)
     demo_results: Dict[str, SimulationResult] = {}
     for name, fn in POLICIES.items():
         rng = np.random.default_rng(123) if name == "Random" else None
         demo_results[name] = simulate_policy(name, fn, s, common_path_demo, rng)
 
-    # Averaged results for right-side comparison
+    # Averaged cost curves for comparison
     aggregate_results: Dict[str, AggregateResult] = {}
     for name, fn in POLICIES.items():
         all_cum_costs = []
@@ -253,145 +254,160 @@ def compute_all_results(n_replications: int = 200) -> Tuple[
 
 
 # =========================================================
-# Plotting: left big queue/server figure
+# Plotting helpers
 # =========================================================
 
-def draw_system_figure(
+def policy_color(action: int) -> str:
+    if action == 1:
+        return "#ff9999"   # red-ish
+    if action == 2:
+        return "#99ccff"   # blue-ish
+    return "#dddddd"
+
+
+def action_text(action: int) -> str:
+    if action == 1:
+        return "Serve Q1"
+    if action == 2:
+        return "Serve Q2"
+    return "Idle"
+
+
+def action_color(action: int) -> str:
+    if action == 1:
+        return "red"
+    if action == 2:
+        return "blue"
+    return "black"
+
+
+def draw_mini_system_panel(
+    ax,
     result: SimulationResult,
     t: int,
     scenario: Scenario,
     policy_name: str,
-) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.set_xlim(0, 12)
-    ax.set_ylim(0, 10)
+):
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 6)
     ax.axis("off")
 
     q1_now = int(result.q1[t])
     q2_now = int(result.q2[t])
     a = int(result.action[t]) if t < len(result.action) else 0
-    inst = float(result.inst_cost[t]) if t < len(result.inst_cost) else 0.0
-    cum = float(result.cum_disc_cost[t]) if t < len(result.cum_disc_cost) else 0.0
 
-    mu_c1 = scenario.mu1 * scenario.c1
-    mu_c2 = scenario.mu2 * scenario.c2
-
-    # Clean text area
-    ax.text(0.3, 9.6, f"Policy: {policy_name}", fontsize=13, weight="bold")
-    ax.text(0.3, 9.1, f"Time step: {t}", fontsize=12)
-
-    if a == 1:
-        serve_txt = "Serving Queue 1"
-        serve_color = "red"
-    elif a == 2:
-        serve_txt = "Serving Queue 2"
-        serve_color = "blue"
-    else:
-        serve_txt = "Idle"
-        serve_color = "black"
-
-    ax.text(0.3, 8.6, serve_txt, fontsize=12, color=serve_color, weight="bold")
-    ax.text(0.3, 8.0, rf"$\mu_1c_1={mu_c1:.2f}$,   $\mu_2c_2={mu_c2:.2f}$", fontsize=12)
-    ax.text(0.3, 7.4, f"Instantaneous cost: {inst:.2f}", fontsize=12)
-    ax.text(0.3, 6.8, f"Cumulative discounted cost: {cum:.2f}", fontsize=12)
-
-    # Queue bars side by side
     max_vis = max(
         1,
         np.max(result.q1[: len(result.action) + 1]),
         np.max(result.q2[: len(result.action) + 1]),
     )
 
-    bar_bottom = 1.4
-    bar_height = 4.6
-    bar_width = 1.6
-    q1_x = 1.5
-    q2_x = 4.0
+    # Layout: two horizontal queues, stacked vertically, server on the right
+    q_x = 1.0
+    q_w = 4.5
+    q_h = 0.7
+    q1_y = 3.7
+    q2_y = 2.2
 
-    h1 = bar_height * min(q1_now / max_vis, 1.0)
-    h2 = bar_height * min(q2_now / max_vis, 1.0)
+    # Outline bars
+    ax.add_patch(Rectangle((q_x, q1_y), q_w, q_h, fill=False, linewidth=1.8))
+    ax.add_patch(Rectangle((q_x, q2_y), q_w, q_h, fill=False, linewidth=1.8))
 
-    for x, label, h, q_now in [
-        (q1_x, "Queue 1", h1, q1_now),
-        (q2_x, "Queue 2", h2, q2_now),
-    ]:
-        ax.add_patch(Rectangle((x, bar_bottom), bar_width, bar_height, fill=False, linewidth=2))
-        ax.add_patch(Rectangle((x, bar_bottom), bar_width, h, alpha=0.55))
-        ax.text(x + bar_width / 2, bar_bottom + bar_height + 0.35, label, ha="center", fontsize=12)
-        ax.text(x + bar_width / 2, bar_bottom + bar_height / 2, f"{q_now}", ha="center", va="center", fontsize=14)
+    # Fills
+    fill1 = q_w * min(q1_now / max_vis, 1.0)
+    fill2 = q_w * min(q2_now / max_vis, 1.0)
+
+    ax.add_patch(Rectangle((q_x, q1_y), fill1, q_h, alpha=0.55))
+    ax.add_patch(Rectangle((q_x, q2_y), fill2, q_h, alpha=0.55))
+
+    ax.text(q_x - 0.1, q1_y + q_h / 2, "Q1", ha="right", va="center", fontsize=10)
+    ax.text(q_x - 0.1, q2_y + q_h / 2, "Q2", ha="right", va="center", fontsize=10)
+
+    ax.text(q_x + q_w + 0.15, q1_y + q_h / 2, f"{q1_now}", ha="left", va="center", fontsize=10)
+    ax.text(q_x + q_w + 0.15, q2_y + q_h / 2, f"{q2_now}", ha="left", va="center", fontsize=10)
 
     # Server
-    server_x = 8.0
-    server_y = 3.0
-    server_w = 2.2
-    server_h = 1.8
+    server_x = 7.1
+    server_y = 2.8
+    server_w = 1.7
+    server_h = 1.2
 
-    server_color = "#DDDDDD"
-    if a == 1:
-        server_color = "#ffb3b3"
-    elif a == 2:
-        server_color = "#b3d9ff"
-
-    ax.add_patch(Rectangle((server_x, server_y), server_w, server_h,
-                           facecolor=server_color, edgecolor="black", linewidth=2))
-    ax.text(server_x + server_w / 2, server_y + server_h / 2,
-            "Server", ha="center", va="center", fontsize=13)
+    ax.add_patch(
+        Rectangle(
+            (server_x, server_y),
+            server_w,
+            server_h,
+            facecolor=policy_color(a),
+            edgecolor="black",
+            linewidth=1.8,
+        )
+    )
+    ax.text(server_x + server_w / 2, server_y + server_h / 2, "Server",
+            ha="center", va="center", fontsize=10)
 
     # Arrows
-    q1_arrow_color = "red" if a == 1 else "black"
-    q2_arrow_color = "blue" if a == 2 else "black"
+    ax.add_patch(
+        FancyArrowPatch(
+            (q_x + q_w, q1_y + q_h / 2),
+            (server_x, server_y + 0.9),
+            arrowstyle="->",
+            mutation_scale=14,
+            linewidth=2.0,
+            color="red" if a == 1 else "black",
+        )
+    )
+    ax.add_patch(
+        FancyArrowPatch(
+            (q_x + q_w, q2_y + q_h / 2),
+            (server_x, server_y + 0.3),
+            arrowstyle="->",
+            mutation_scale=14,
+            linewidth=2.0,
+            color="blue" if a == 2 else "black",
+        )
+    )
 
-    ax.add_patch(
-        FancyArrowPatch(
-            (q1_x + bar_width, bar_bottom + bar_height / 2),
-            (server_x, server_y + 1.2),
-            arrowstyle="->",
-            mutation_scale=18,
-            linewidth=2.5,
-            color=q1_arrow_color,
+    # Title and small status
+    ax.text(0.1, 5.55, policy_name, fontsize=11, weight="bold")
+    ax.text(0.1, 5.05, action_text(a), fontsize=10, color=action_color(a), weight="bold")
+
+    if policy_name == "μc-rule":
+        ax.text(
+            0.1, 4.55,
+            rf"$\mu_1c_1={scenario.mu1*scenario.c1:.2f},\ \mu_2c_2={scenario.mu2*scenario.c2:.2f}$",
+            fontsize=9
         )
-    )
-    ax.add_patch(
-        FancyArrowPatch(
-            (q2_x + bar_width, bar_bottom + bar_height / 2),
-            (server_x, server_y + 0.6),
-            arrowstyle="->",
-            mutation_scale=18,
-            linewidth=2.5,
-            color=q2_arrow_color,
-        )
-    )
+
+
+def draw_system_grid(
+    demo_results: Dict[str, SimulationResult],
+    t: int,
+    scenario: Scenario,
+) -> plt.Figure:
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+    axes = axes.flatten()
+
+    for ax, name in zip(axes, demo_results.keys()):
+        draw_mini_system_panel(ax, demo_results[name], t, scenario, name)
 
     fig.tight_layout()
     return fig
 
 
-# =========================================================
-# Plotting: right-side cost panels
-# =========================================================
-
 def draw_cost_grid(
     aggregate_results: Dict[str, AggregateResult],
     t: int,
-    selected_policy: str,
 ) -> plt.Figure:
-    fig, axes = plt.subplots(2, 2, figsize=(9, 6))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6))
     axes = axes.flatten()
 
-    names = list(aggregate_results.keys())
-
-    for ax, name in zip(axes, names):
+    for ax, name in zip(axes, aggregate_results.keys()):
         res = aggregate_results[name]
         x = res.times[: t + 1]
         y = res.mean_cum_disc_cost[: t + 1]
 
         ax.plot(x, y, linewidth=2)
-        ax.set_title(name, fontsize=10, weight="bold" if name == selected_policy else None)
-
-        if name == selected_policy:
-            for spine in ax.spines.values():
-                spine.set_linewidth(2.5)
-
+        ax.set_title(name, fontsize=10, weight="bold")
         ax.set_xlim(0, len(res.times) - 1)
         ax.set_xlabel("time", fontsize=9)
         ax.set_ylabel("mean cum. cost", fontsize=9)
@@ -437,20 +453,19 @@ def main() -> None:
 
     with st.expander("Scenario", expanded=False):
         st.write(scenario_summary(scenario))
-        st.write("Left panel: one representative sample path.")
-        st.write("Right panel: mean cumulative discounted cost over many replications.")
-
-    top_controls = st.columns([1.2, 1, 1])
-    with top_controls[0]:
-        selected_policy = st.selectbox(
-            "Policy shown on the left",
-            list(demo_results.keys()),
-            index=0,
+        st.write(
+            "Top row: one representative sample path for each policy. "
+            "Bottom row: mean cumulative discounted cost over many replications."
         )
-    with top_controls[1]:
+        st.write(
+            "This scenario is chosen so that highest-cost-only and μc-rule are different policies."
+        )
+
+    controls = st.columns([1, 1])
+    with controls[0]:
         autoplay = st.checkbox("Autoplay", value=False)
-    with top_controls[2]:
-        speed = st.selectbox("Speed", ["Slow", "Medium", "Fast"], index=1)
+    with controls[1]:
+        speed = st.selectbox("Speed", ["Slow", "Medium", "Fast"], index=2)
 
     max_t = scenario.horizon - 1
 
@@ -460,38 +475,25 @@ def main() -> None:
     t = st.slider("Time", 0, max_t, st.session_state.timestep, 1)
     st.session_state.timestep = t
 
-    left, right = st.columns([1.05, 1.15])
+    st.subheader("System behavior")
+    fig_systems = draw_system_grid(demo_results, st.session_state.timestep, scenario)
+    st.pyplot(fig_systems, clear_figure=True)
 
-    with left:
-        st.subheader("System behavior")
-        fig_left = draw_system_figure(
-            demo_results[selected_policy],
-            st.session_state.timestep,
-            scenario,
-            selected_policy,
-        )
-        st.pyplot(fig_left, clear_figure=True)
+    st.subheader("Policy comparison")
+    fig_costs = draw_cost_grid(aggregate_results, st.session_state.timestep)
+    st.pyplot(fig_costs, clear_figure=True)
 
-    with right:
-        st.subheader("Policy comparison")
-        fig_right = draw_cost_grid(
-            aggregate_results,
-            st.session_state.timestep,
-            selected_policy,
-        )
-        st.pyplot(fig_right, clear_figure=True)
-
-        ranking = sorted(
-            [(name, res.mean_final_cost) for name, res in aggregate_results.items()],
-            key=lambda kv: kv[1],
-        )
-        st.markdown("**Mean final discounted cost ranking**")
-        for i, (name, value) in enumerate(ranking, start=1):
-            st.write(f"{i}. {name}: {value:.2f}")
+    ranking = sorted(
+        [(name, res.mean_final_cost) for name, res in aggregate_results.items()],
+        key=lambda kv: kv[1],
+    )
+    st.markdown("**Mean final discounted cost ranking**")
+    for i, (name, value) in enumerate(ranking, start=1):
+        st.write(f"{i}. {name}: {value:.2f}")
 
     if autoplay and st.session_state.timestep < max_t:
-        step_jump = {"Slow": 1, "Medium": 2, "Fast": 5}[speed]
-        delay = {"Slow": 0.50, "Medium": 0.20, "Fast": 0.03}[speed]
+        step_jump = {"Slow": 1, "Medium": 3, "Fast": 6}[speed]
+        delay = {"Slow": 0.40, "Medium": 0.10, "Fast": 0.02}[speed]
         time.sleep(delay)
         st.session_state.timestep = min(max_t, st.session_state.timestep + step_jump)
         st.rerun()
