@@ -55,14 +55,10 @@ class AggregateResult:
 
 
 # =========================================================
-# Fixed scenario
+# Default scenario
 # =========================================================
 
-def get_scenario() -> Scenario:
-    # Designed so:
-    # - c2 > c1  (highest-cost-only prefers Q2)
-    # - mu1*c1 > mu2*c2  (μc-rule prefers Q1)
-    # Horizon increased to 200 as requested.
+def get_default_scenario() -> Scenario:
     return Scenario(
         horizon=200,
         lambda1=0.48,
@@ -217,10 +213,11 @@ def simulate_policy(
 
 
 @st.cache_data
-def compute_all_results(n_replications: int = 200) -> Tuple[
-    Scenario, Dict[str, SimulationResult], Dict[str, AggregateResult]
-]:
-    s = get_scenario()
+def compute_all_results(
+    scenario: Scenario,
+    n_replications: int = 200
+) -> Tuple[Scenario, Dict[str, SimulationResult], Dict[str, AggregateResult]]:
+    s = scenario
 
     # Representative run for animations
     common_path_demo = generate_common_sample_path(s)
@@ -480,11 +477,11 @@ def draw_cost_bar_chart(
 
 def scenario_summary(s: Scenario) -> str:
     return (
-        f"Fixed scenario: "
+        f"Current scenario: "
         f"λ₁={s.lambda1}, λ₂={s.lambda2}, "
         f"μ₁={s.mu1}, μ₂={s.mu2}, "
         f"c₁={s.c1}, c₂={s.c2}, "
-        f"α={s.discount_alpha}, horizon={s.horizon}"
+        f"α={s.discount_alpha}, horizon={s.horizon}, seed={s.seed}"
     )
 
 
@@ -496,7 +493,44 @@ def main() -> None:
     st.title(TITLE)
     st.caption(SUBTITLE)
 
-    scenario, demo_results, aggregate_results = compute_all_results(n_replications=200)
+    default_scenario = get_default_scenario()
+
+    # -----------------------------------------------------
+    # Editable parameters row
+    # -----------------------------------------------------
+    param_cols = st.columns(9)
+    with param_cols[0]:
+        lambda1 = st.number_input("λ1", value=float(default_scenario.lambda1), step=0.01, format="%.3f")
+    with param_cols[1]:
+        lambda2 = st.number_input("λ2", value=float(default_scenario.lambda2), step=0.01, format="%.3f")
+    with param_cols[2]:
+        mu1 = st.number_input("μ1", value=float(default_scenario.mu1), step=0.01, format="%.3f")
+    with param_cols[3]:
+        mu2 = st.number_input("μ2", value=float(default_scenario.mu2), step=0.01, format="%.3f")
+    with param_cols[4]:
+        c1 = st.number_input("c1", value=float(default_scenario.c1), step=0.1, format="%.3f")
+    with param_cols[5]:
+        c2 = st.number_input("c2", value=float(default_scenario.c2), step=0.1, format="%.3f")
+    with param_cols[6]:
+        alpha = st.number_input("α", value=float(default_scenario.discount_alpha), step=0.001, format="%.3f")
+    with param_cols[7]:
+        horizon = st.number_input("Horizon", value=int(default_scenario.horizon), step=10, min_value=1)
+    with param_cols[8]:
+        seed = st.number_input("Seed", value=int(default_scenario.seed), step=1, min_value=0)
+
+    scenario = Scenario(
+        horizon=int(horizon),
+        lambda1=float(lambda1),
+        lambda2=float(lambda2),
+        mu1=float(mu1),
+        mu2=float(mu2),
+        c1=float(c1),
+        c2=float(c2),
+        discount_alpha=float(alpha),
+        seed=int(seed),
+    )
+
+    scenario, demo_results, aggregate_results = compute_all_results(scenario, n_replications=200)
 
     with st.expander("Scenario", expanded=False):
         st.write(scenario_summary(scenario))
