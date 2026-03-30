@@ -453,7 +453,7 @@ def draw_cost_bar_chart(
     means = [aggregate_results[name].mean_final_cost for name in names]
     stds = [aggregate_results[name].std_final_cost for name in names]
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, ax = plt.subplots(figsize=(8, 3.2))
     bars = ax.bar(names, means, yerr=stds, capsize=6, alpha=0.8)
 
     ax.set_ylabel("mean final discounted cost")
