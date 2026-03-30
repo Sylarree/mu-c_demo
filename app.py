@@ -296,7 +296,7 @@ def detect_preemption(result: SimulationResult, t: int) -> Optional[str]:
     prev_queue_remaining = result.q1[t] if prev_a == 1 else result.q2[t]
 
     if prev_queue_remaining > 0:
-        return f"Q{prev_a} job preempted → switched to Q{curr_a}"
+        return f"Preemptive switch: Q{prev_a} → Q{curr_a}"
 
     return None
 
@@ -311,7 +311,7 @@ def draw_mini_system_panel(
     t = min(t, len(result.action) - 1)
 
     ax.set_xlim(0, 10)
-    ax.set_ylim(0, 7)
+    ax.set_ylim(0, 5.8)
     ax.axis("off")
 
     q1_now = int(result.q1[t])
